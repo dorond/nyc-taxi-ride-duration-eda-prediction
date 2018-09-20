@@ -237,3 +237,199 @@ We find:
 - the majority of rides follow a rather smooth distribution that looks almost log-normal with a peak just short of 1000 seconds, i.e. about 17 minutes.
 - There are several suspiciously short rides with less than 10 seconds duration.
 - Additionally, there is a strange delta-shaped peak of trip_duration just before the 1e5 seconds mark and even a few way above it:
+
+```{r}
+train %>%
+  arrange(desc(trip_duration)) %>%
+  select(trip_duration, pickup_datetime, dropoff_datetime, everything()) %>%
+  head(10)
+```
+
+Those records would correspond to 24-hour trips and beyond, with a maximum of almost 12 days. I know that rush hour can be bad, but those values are a little unbelievable.
+
+Over the year, the distributions of `pickup_datetime` and `dropoff_datetime` look like this:
+
+```{r}
+p1 <- train %>%
+  ggplot(aes(pickup_datetime)) +
+  geom_histogram(fill = "red", bins = 120) +
+  labs(x = "Pickup dates")
+
+p2 <- train %>%
+  ggplot(aes(dropoff_datetime)) +
+  geom_histogram(fill = "blue", bins = 120) +
+  labs(x = "Dropoff dates")
+
+layout <- matrix(c(1,2), 2, 1, byrow=FALSE)
+multiplot(p1, p2, layout=layout)
+```
+```{r}
+p1 <- 1; p2 <- 1
+```
+
+Fairly homogeneous, covering half a year between January and July 2016. There is an interesting drop around late January early February:
+
+```{r}
+train %>%
+  filter(pickup_datetime > ymd("2016-01-20") & pickup_datetime < ymd("2016-02-10")) %>%
+  ggplot(aes(pickup_datetime)) +
+  geom_histogram(fill = "red", bins = 120)
+```
+
+That’s winter in NYC, so maybe snow storms or other heavy weather? Events like this should be taken into account, maybe through some handy external data set?
+
+In the plot above we can already see some daily and weekly modulations in the number of trips. Let’s investigate these variations together with the distributions of `passenger_count` and `vendor_id` by creating a multi-plot panel with different components:
+
+```{r}
+p1 <- train %>%
+  group_by(passenger_count) %>%
+  count() %>%
+  ggplot(aes(passenger_count, n, fill = passenger_count)) +
+  geom_col() +
+  scale_y_sqrt() +
+  theme(legend.position = "none")
+
+p2 <- train %>%
+  ggplot(aes(vendor_id, fill = vendor_id)) +
+  geom_bar() +
+  theme(legend.position = "none")
+
+p3 <- train %>%
+  ggplot(aes(store_and_fwd_flag)) +
+  geom_bar() +
+  theme(legend.position = "none") +
+  scale_y_log10()
+
+p4 <- train %>%
+  mutate(wday = wday(pickup_datetime, label = TRUE)) %>%
+  group_by(wday, vendor_id) %>%
+  count() %>%
+  ggplot(aes(wday, n, colour = vendor_id)) +
+  geom_point(size = 4) +
+  labs(x = "Day of the week", y = "Total number of pickups") +
+  theme(legend.position = "none")
+
+p5 <- train %>%
+  mutate(hpick = hour(pickup_datetime)) %>%
+  group_by(hpick, vendor_id) %>%
+  count() %>%
+  ggplot(aes(hpick, n, color = vendor_id)) +
+  geom_point(size = 4) +
+  labs(x = "Hour of the day", y = "Total number of pickups") +
+  theme(legend.position = "none")
+
+
+layout <- matrix(c(1,2,3,4,5,5), 3, 2, byrow=TRUE)
+multiplot(p1, p2, p3, p4, p5, layout=layout)
+```
+
+```{r}
+p1 <- 1; p2 <- 1; p3 <- 1; p4 <- 1; p5 <- 1
+```
+
+We find:
+
+- There are a few trips with zero, or seven to nine passengers but they are a rare exception:
+
+```{r}
+train %>%
+  group_by(passenger_count) %>%
+  count()
+```
+
+- The vast majority of rides had only a single passenger, with two passengers being the (distant) second most popular option.
+- Towards larger passenger numbers we are seeing a smooth decline through 3 to 4, until the larger crowds (and larger cars) give us another peak at 5 to 6 passengers.
+- Vendor 2 has significantly more trips in this data set than vendor 1 (note the logarithmic y-axis). This is true for every day of the week.
+- We find an interesting pattern with Monday being the quietest day and Friday very busy. This is the same for the two different vendors, with `vendor_id == 2` showing significantly higher trip numbers.
+- As one would intuitively expect, there is a strong dip during the early morning hours. There we also see not much difference between the two vendors. We find another dip around 4pm and then the numbers increase towards the evening.
+- The `store_and_fwd_flag` values, indicating whether the trip data was sent immediately to the vendor (“N”) or held in the memory of the taxi because there was no connection to the server (“Y”), show that there was almost no storing taking place (note again the logarithmic y-axis):
+
+```{r}
+train %>%
+  group_by(store_and_fwd_flag) %>%
+  count()
+```
+
+These numbers are equivalent to about half a percent of trips not being transmitted immediately.
+
+The trip volume per hour of the day depends somewhat on the month and strongly on the day of the week:
+
+```{r}
+p1 <- train %>%
+  mutate(hpick = hour(pickup_datetime),
+         Month = factor(month(pickup_datetime, label = TRUE))) %>%
+  group_by(hpick, Month) %>%
+  count() %>%
+  ggplot(aes(hpick, n, color = Month)) +
+  geom_line(size = 1.5) +
+  labs(x = "Hour of the day", y = "count")
+
+p2 <- train %>%
+  mutate(hpick = hour(pickup_datetime),
+         wday = factor(wday(pickup_datetime, label = TRUE))) %>%
+  group_by(hpick, wday) %>%
+  count() %>%
+  ggplot(aes(hpick, n, color = wday)) +
+  geom_line(size = 1.5) +
+  labs(x = "Hour of the day", y = "count")
+
+layout <- matrix(c(1,2),2,1,byrow=FALSE)
+multiplot(p1, p2, layout=layout)
+```
+
+```{r}
+p1 <- 1; p2 <- 1
+```
+
+We find:
+
+- January and June have fewer trips, whereas March and April are busier months. This tendency is observed for both `vendor_ids`.
+- The weekend (Sat and Sun, plus Fri to an extend) have higher trip numbers during the early morning ours but lower ones in the morning between 5 and 10, which can most likely be attributed to the contrast between NYC business days and weekend night life. In addition, trip numbers drop on a Sunday evening/night.
+
+Finally, we will look at a simple overview visualisation of the pickup/dropoff latitudes and longitudes:
+
+```{r}
+p1 <- train %>%
+  filter(pickup_longitude > -74.05 & pickup_longitude < -73.7) %>%
+  ggplot(aes(pickup_longitude)) +
+  geom_histogram(fill = "red", bins = 40)
+
+p2 <- train %>%
+  filter(dropoff_longitude > -74.05 & dropoff_longitude < -73.7) %>%
+  ggplot(aes(dropoff_longitude)) +
+  geom_histogram(fill = "blue", bins = 40)
+
+p3 <- train %>%
+  filter(pickup_latitude > 40.6 & pickup_latitude < 40.9) %>%
+  ggplot(aes(pickup_latitude)) +
+  geom_histogram(fill = "red", bins = 40)
+
+p4 <- train %>%
+  filter(dropoff_latitude > 40.6 & dropoff_latitude < 40.9) %>%
+  ggplot(aes(dropoff_latitude)) +
+  geom_histogram(fill = "blue", bins = 40)
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=FALSE)
+multiplot(p1, p2, p3, p4, layout=layout)
+```
+
+```{r}
+p1 <- 1; p2 <- 1; p3 <- 1; p4 <- 1
+```
+Here we had constrain the range of latitude and longitude values, because there are a few cases which are way outside the NYC boundaries. The resulting distributions are consistent with the focus on Manhattan that we had already seen on the map. These are the most extreme values from the `pickup_latitude` feature:
+
+```{r}
+train %>%
+  arrange(pickup_latitude) %>%
+  select(pickup_latitude, pickup_longitude) %>%
+  head(5)
+```
+
+```{r}
+train %>%
+  arrange(desc(pickup_latitude)) %>%
+  select(pickup_latitude, pickup_longitude) %>%
+  head(5)
+```
+
+We need to keep the existence of these (rather astonishing) values in mind so that they don’t bias our analysis.
