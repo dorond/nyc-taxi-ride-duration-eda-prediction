@@ -1,0 +1,239 @@
+---
+title: "nyc-taxi-duration-eda-prediction"
+author: "Doron Dusheiko"
+date: "20 September 2018"
+output: html_document
+number_sections: true 
+toc: true 
+fig_width: 7 
+fig_height: 4.5 
+theme: cosmo 
+highlight: tango 
+code_folding: show 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This is a comprehensive Exploratory Data Analysis for the New York City Taxi Trip Duration competition with tidy R and ggplot2.
+
+The goal of this playground challenge is to predict the duration of taxi rides in NYC based on features like trip coordinates or pickup date and time. The data comes in the shape of 1.5 million training observations (../input/train.csv) and 630k test observation (../input/test.csv). Each row contains one taxi trip.
+
+In this notebook, we will first study and visualise the original data, engineer new features, and examine potential outliers. Then we add two external data sets on the NYC weather and on the theoretically fastest routes. We visualise and analyse the new features within these data sets and their impact on the target trip_duration values. Finally, we will make a brief excursion into viewing this challenge as a classification problem and finish this notebook with a simple XGBoost model that provides a basic prediction.
+
+Enough talk. Let’s get started:
+
+## Load libraries and helper functions
+
+```{r}
+library('ggplot2') # visualisation
+library('scales') # visualisation
+library('grid') # visualisation
+library('RColorBrewer') # visualisation
+library('corrplot') # visualisation
+library('alluvial') # visualisation
+library('dplyr') # data manipulation
+library('readr') # input/output
+library('data.table') # data manipulation
+library('tibble') # data wrangling
+library('tidyr') # data wrangling
+library('stringr') # string manipulation
+library('forcats') # factor manipulation
+library('lubridate') # date and time
+library('geosphere') # geospatial locations
+library('leaflet') # maps
+library('leaflet.extras') # maps
+library('maps') # maps
+library('xgboost') # modelling
+library('caret') # modelling
+```
+
+We use the multiplot function, courtesy of [R Cookbooks](http://www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2)/) to create multi-panel plots.
+
+```{r}
+# Define multiple plot function
+
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+
+  # Make a list from the ... arguments and plotlist
+
+  plots <- c(list(...), plotlist)
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+
+  if (is.null(layout)) {
+
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+
+  }
+  
+  if (numPlots==1) {
+
+    print(plots[[1]])
+
+  } else {
+
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+
+    }
+
+  }
+
+}
+```
+
+## Load data
+
+We use _data.table’s_ fread function to speed up reading in the data:
+
+```{r}
+train <- as.tibble(fread('input/train.csv'))
+test <- as.tibble(fread('input/test.csv'))
+sample_submit <- as.tibble(fread('input/sample_submission.csv'))
+```
+
+## File structure and content
+
+Let’s have an overview of the data sets using the summary and glimpse tools. First the training data:
+
+```{r}
+summary(train)
+```
+
+```{r}
+glimpse(train)
+```
+
+And then the testing data:
+
+```{r}
+summary(test)
+```
+
+```{r}
+glimpse(test)
+```
+
+We find:
+
+- `vendor_id` only takes the values 1 or 2, presumably to differentiate two taxi companies
+- `pickup_datetime` and (in the training set) dropoff_datetime are combinations of date and time that we will have to re-format into a more useful shape
+- `passenger_count` takes a median of 1 and a maximum of 9 in both data sets
+- The `pickup/dropoff_longitute/latitute` describes the geographical coordinates where the meter was activate/deactivated.
+- `store_and_fwd_flag` is a flag that indicates whether the trip data was sent immediately to the vendor (“N”) or held in the memory of the taxi because there was no connection to the server (“Y”). Maybe there could be a correlation with certain geographical areas with bad reception?
+- `trip_duration`: our target feature in the training data is measured in seconds.
+
+## Missing values
+
+Knowing about missing values is important because they indicate how much we don’t know about our data. Making inferences based on just a few cases is often unwise. In addition, many modelling procedures break down when missing values are involved and the corresponding rows will either have to be removed completely or the values need to be estimated somehow.
+
+Here, we are in the fortunate position that our data is complete and there are no missing values:
+
+```{r}
+sum(is.na(train))
+
+sum(is.na(test))
+```
+
+## Combining train and test
+
+In preparation for our eventual modelling analysis we combine the train and test data sets into a single one. I find it generally best not to examine the test data too closely, since this bears the risk of overfitting your analysis to this data. However, a few simple consistency checks between the two data sets can be of advantage.
+
+```{r}
+combine <- bind_rows(train %>% mutate(dset = "train"), 
+                     test %>% mutate(dset = "test",
+                                     dropoff_datetime = NA,
+                                     trip_duration = NA))
+
+combine <- combine %>% mutate(dset = factor(dset))
+```
+
+## Reformating features
+
+For our following analysis, we will turn the data and time from characters into date objects. We also recode vendor_id as a factor. This makes it easier to visualise relationships that involve these features.
+
+```{r}
+train <- train %>%
+  mutate(pickup_datetime = ymd_hms(pickup_datetime),
+         dropoff_datetime = ymd_hms(dropoff_datetime),
+         vendor_id = factor(vendor_id),
+         passenger_count = factor(passenger_count))
+```
+
+## Consistency check
+
+It is worth checking whether the `trip_durations` are consistent with the intervals between the pickup_datetime and dropoff_datetime. Presumably the former were directly computed from the latter, but you never know. Below, the check variable shows “TRUE” if the two intervals are not consistent:
+
+```{r}
+train %>%
+  mutate(check = abs(int_length(interval(dropoff_datetime, pickup_datetime)) + trip_duration) > 0) %>%
+  select(check, pickup_datetime, dropoff_datetime, trip_duration) %>%
+  group_by(check) %>%  count()
+```
+
+And we find that everything fits perfectly.
+
+# Individual feature visualisations
+
+Visualisations of feature distributions and their relations are key to understanding a data set, and they often open up new lines of inquiry. I always recommend to examine the data from as many different perspectives as possible to notice even subtle trends and correlations.
+
+In this section we will begin by having a look at the distributions of the individual data features.
+
+We start with a map of NYC and overlay a managable number of pickup coordinates to get a general overview of the locations and distances in question. For this visualisation we use the leaflet package, which includes a variety of cool tools for interactive maps. In this map you can zoom and pan through the pickup locations
+
+```{r}
+set.seed(1234)
+foo <- sample_n(train, 8e3)
+
+leaflet(data = foo) %>% addProviderTiles("Esri.NatGeoWorldMap") %>%
+  addCircleMarkers(~ pickup_longitude, ~pickup_latitude, radius = 1,
+                   color = "blue", fillOpacity = 0.3)
+```
+
+In turns out that almost all of our trips were in fact taking place in Manhattan only. Another notable hot-spot is JFK airport towards the south-east of the city.
+
+The map gives us an idea what some of the our distributions could look like. Let’s start with plotting the target feature `trip_duration`:
+
+```{r}
+train %>%
+  ggplot(aes(trip_duration)) +
+  geom_histogram(fill = "red", bins = 150) +
+  scale_x_log10() +
+  scale_y_sqrt()
+```
+
+Note the logarithmic x-axis and square-root y-axis.
+
+We find:
+
+- the majority of rides follow a rather smooth distribution that looks almost log-normal with a peak just short of 1000 seconds, i.e. about 17 minutes.
+- There are several suspiciously short rides with less than 10 seconds duration.
+- Additionally, there is a strange delta-shaped peak of trip_duration just before the 1e5 seconds mark and even a few way above it:
