@@ -433,3 +433,107 @@ train %>%
 ```
 
 We need to keep the existence of these (rather astonishing) values in mind so that they don’t bias our analysis.
+
+# Feature relations
+
+While the previous section looked primarily at the distributions of the individual features, here we will examine in more detail how those features are related to each other and to our target `trip_duration`.
+
+## Pickup date/time vs trip_duration
+
+How does the variation in trip numbers throughout the day and the week affect the average trip duration? Do quieter days and hours lead to faster trips? Here we include the vendor_id as an additional feature. Furthermore, for the hours of the day we add a smoothing layer to indicate the extent of the variation and its uncertainties:
+
+```{r}
+p1 <- train %>%
+  mutate(wday = wday(pickup_datetime, label = TRUE)) %>%
+  group_by(wday, vendor_id) %>%
+  summarise(median_duration = median(trip_duration)/60) %>%
+  ggplot(aes(wday, median_duration, color = vendor_id)) +
+  geom_point(size = 4) +
+  labs(x = "Day of the week", y = "Median trip duration [min]")
+
+p2 <- train %>%
+  mutate(hpick = hour(pickup_datetime)) %>%
+  group_by(hpick, vendor_id) %>%
+  summarise(median_duration = median(trip_duration)/60) %>%
+  ggplot(aes(hpick, median_duration, color = vendor_id)) +
+  geom_smooth(method = "loess", span = 1/2) +
+  geom_point(size = 4) +
+  labs(x = "Hour of the day", y = "Median trip duration [min]") +
+  theme(legend.position = "none")
+
+
+layout <- matrix(c(1,2),2,1,byrow=FALSE)
+multiplot(p1, p2, layout=layout)
+```
+
+```{r}
+p1 <- 1; p2 <- 1
+```
+
+We find:
+
+- There is indeed a similar pattern as for the business of the day of the week. Vendor 2, the one with the more frequent trips, also has consistently higher trip durations than vendor 1. It will be worth adding the vendor_id feature to a model to test its predictive importance.
+- Over the course of a typical day we find a peak in the early afternoon and dips around 5-6am and 8pm. The weekday and hour of a trip appear to be important features for predicting its duration and should be included in a successful model.
+
+## Passenger count and Vendor vs trip_duration
+
+The next question we are asking is whether different numbers of passengers and/or the different vendors are correlated with the duration of the trip. We choose to examine this issue using a series of boxplots for the passenger_counts together with a facet wrap which contrasts the two vendor_ids:
+
+```{r}
+train %>%
+
+  ggplot(aes(passenger_count, trip_duration, color = passenger_count)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  facet_wrap(~ vendor_id) +
+  labs(y = "Trip duration [s]", x = "Number of passengers")
+```
+
+We find:
+
+- Both vendors have short trips without any passengers.
+- Vendor 1 has all of the trips beyond 24 hours, whereas vendor 2 has all of the (five) trips with more than six passengers and many more trips that approach the 24-hour limit.
+- Between 1 and 6 passengers the median trip durations are remarkably similar, in particular for vendor 2. There might be differences for vendor 1, but they are small (note the logarithmic y-axis):
+
+```{r}
+train %>%
+  ggplot(aes(trip_duration, fill = vendor_id)) +
+  geom_density(position = "stack") +
+  scale_x_log10()
+```
+
+Comparing the densities of the trip_duration distribution for the two vendors we find that the medians are very similar, whereas the means are likely skewed by vendor 2 containing most of the long-duration outliers:
+
+```{r}
+train %>%
+  group_by(vendor_id) %>%
+  summarise(mean_duration = mean(trip_duration),
+            median_duration = median(trip_duration))
+```
+
+## Store and Forward vs trip_duration
+
+The temporary storing of the trip data only occured for Vendor 1:
+
+```{r}
+train %>%
+  group_by(vendor_id, store_and_fwd_flag) %>%
+  count()
+```
+
+```{r}
+train %>%
+  filter(vendor_id == 1) %>%
+  ggplot(aes(passenger_count, trip_duration, color = passenger_count)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  facet_wrap(~ store_and_fwd_flag) +
+  theme(legend.position = "none") +
+  labs(y = "Trip duration [s]", x = "Number of passengers") +
+  ggtitle("Store_and_fwd_flag impact")
+```
+
+We find that there is no overwhelming differences between the stored and non-stored trips. The stored ones might be slightly longer, though, and don’t include any of the suspiciously long trips.
+
+
